@@ -2,26 +2,8 @@
 # Name:        plot_wall_diagrams
 # Purpose:     plot horizontal displacement, bending moment and shear force
 #              diagrams vs. altitude for a vertical profile through a shell
-#              (wall) panel, at a chosen along-wall location -- the same
-#              "M/T/disp vs depth" diagram BerlinSand's plot_excavation2D.py
-#              draws for a 2D wall, generalized to any wall orientation in a
-#              3D model.
+#              (wall) panel, at a chosen along-wall location.
 #
-# The displacement/moment/shear components plotted are defined by the
-# WALL's OWN geometry (its LocalX/LocalY/LocalZ, as exported by
-# zsoil_to_vtk.py's get_element_local_axes()), not by the cut plane's
-# orientation -- so the same code gives physically correct results for
-# walls running in any direction, without hardcoding which raw
-# SMOMENT/SQFORCE component happens to be "the right one" for a particular
-# wall (that would silently break, or silently be wrong, for a wall running
-# the other way). moment_and_shear_along() reproduces ZSoilPy3's own
-# Element.set_transf_matrices() + Shell_EleResults transform in pure numpy,
-# from the already-exported local axes and raw SMOMENT/SQFORCE -- verified
-# to match the SDK-based computation exactly (0.0 difference) across every
-# segment used here.
-#
-# This script only reads the exported .vtu -- it does not need the ZSoilPy3
-# SDK (or a ZSoil license) at all, unlike the first version of this script.
 #
 # Requires:    a SHELLS .vtu already exported for the requested step by
 #              zsoil_to_vtk.py, carrying (all on by default): Material,
@@ -48,12 +30,9 @@ def find_profile_segments(cut, plane_def, select_tol, wall_mat):
     """
     From a plane's vtkCutter output `cut` (of a SHELLS .vtu), return the cut
     segments belonging to material `wall_mat` that lie within `select_tol`
-    of the plane's origin along `plane_def.axes[0]` (which must be a unit
-    vector for `select_tol` to be a true distance) -- i.e. one
-    representative vertical profile through the wall, at the along-wall
-    location given by the origin. A cut plane can cross more than one wall
-    (e.g. two parallel walls on opposite sides of an excavation); this is
-    how a single one is picked out.
+    of the plane's origin. A cut plane can cross more than one wall
+    (e.g. two parallel walls on opposite sides of an excavation); the
+    `select_tol` instructs how a single one is picked out.
 
     Returns a list of dicts, one per segment, with the raw per-cell/per-point
     data needed to compute displacement/moment/shear in main().
@@ -172,6 +151,11 @@ def main(cut_planes, prob, step, vtk_dir, wall_mat, vertical_dir, select_tol):
         fig.text(0.01, 0.01, prob, size=8)
         AX = [fig.add_subplot(1, 3, kk + 1) for kk in range(3)]
 
+        ylim = [1e10, -1e10]
+        ulim = [1e10, -1e10]
+        Mlim = [1e10, -1e10]
+        Tlim = [1e10, -1e10]
+
         for seg in segments:
             result = moment_and_shear_along(
                 vertical_dir, seg["local_x"], seg["local_y"], seg["M"], seg["Q"])
@@ -185,22 +169,41 @@ def main(cut_planes, prob, step, vtk_dir, wall_mat, vertical_dir, select_tol):
             y0, y1 = seg["y0"], seg["y1"]
 
             # M/T come from one Gauss point at the element's center; plot M
-            # varying linearly across the element assuming a constant shear
-            # T, same convention as BerlinSand's plot_excavation2D.py.
+            # varying linearly across the element assuming a constant shear T
             dy = 0.5 * (y1 - y0)
-            AX[0].plot([u0, u1], [y0, y1], color='C0')
-            AX[1].plot([M - dy * T, M + dy * T], [y0, y1], color='C0')
-            AX[2].plot([0, T, T, 0], [y0, y0, y1, y1], color='C0')
+            u_vals = [u0, u1]
+            M_vals = [M - dy * T, M + dy * T]
+            T_vals = [0, T, T, 0]
+            AX[0].plot(u_vals, [y0, y1], color='C0')
+            AX[1].plot(M_vals, [y0, y1], color='C0')
+            AX[2].plot(T_vals, [y0, y0, y1, y1], color='C0')
+
+            ylim[0] = min(ylim[0], y0, y1)
+            ylim[1] = max(ylim[1], y0, y1)
+            ulim[0] = min(ulim[0], *u_vals)
+            ulim[1] = max(ulim[1], *u_vals)
+            Mlim[0] = min(Mlim[0], *M_vals)
+            Mlim[1] = max(Mlim[1], *M_vals)
+            Tlim[0] = min(Tlim[0], *T_vals)
+            Tlim[1] = max(Tlim[1], *T_vals)
 
         AX[0].set_xlabel(u'Horizontal displacement perp. to wall [mm]')
         AX[1].set_xlabel(u'Bending moment [kNm/m]')
         AX[2].set_xlabel(u'Shear force [kN/m]')
         for ax in AX:
             ax.set_ylabel(u'Altitude [m]')
+            ax.set_ylim(ylim)
             ax.grid('on')
 
-        fig.text(0.5, 0.97, 'Profile ' + plane_def.title, size=14, ha='center')
-        fig.tight_layout()
+        AX[0].annotate('$u_{min}=%1.0f$ mm\n$u_{max}=%1.0f$ mm' % (ulim[0], ulim[1]),
+                        xy=(0.05, 0.02), xycoords='axes fraction', rotation=90, va='bottom')
+        AX[1].annotate('$M_{min}=%1.0f$ kNm/m\n$M_{max}=%1.0f$ kNm/m' % (Mlim[0], Mlim[1]),
+                        xy=(0.05, 0.02), xycoords='axes fraction', rotation=90, va='bottom')
+        AX[2].annotate('$T_{min}=%1.0f$ kN/m\n$T_{max}=%1.0f$ kN/m' % (Tlim[0], Tlim[1]),
+                        xy=(0.05, 0.02), xycoords='axes fraction', rotation=90, va='bottom')
+
+        fig.text(0.5, 0.97, 'Profile %s, T=%g' % (plane_def.title, step), size=14, ha='center')
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
         fig.savefig('{}_wall_diagrams_{}'.format(prob, plane_def.title))
         plt.close(fig)
 

@@ -15,13 +15,14 @@ ZSoil install, not just this repository.
 
 ## What's in here
 
-Two worked examples, each pairing a ZSoil input deck with a set of Python scripts that
+Three worked examples, each pairing a ZSoil input deck with a set of Python scripts that
 read the solver's result files and turn them into figures:
 
 | Example | Problem | Scripts |
 |---|---|---|
 | [`BerlinSand/`](BerlinSand) | Braced excavation retained by an anchored diaphragm wall | `run_all.py` + 5 `plot_*.py` modules |
 | [`PileFoundation/`](PileFoundation) | 3×2 pile group under a raft | `plot_piles_3D.py`, `plot_piles_diagrams.py` |
+| [`vtk-examples/3Ddeepex/`](vtk-examples/3Ddeepex) | 3D braced excavation with diaphragm walls (shell elements) | `extract_vtk.py` + 3 `plot_*.py` modules, on top of the shared `vtk-examples/zsoil_to_vtk.py` exporter |
 
 ## Extraction pipeline
 
@@ -81,8 +82,72 @@ Example output at T=5.0:
 </tr>
 </table>
 
+## VTK export pipeline
+
+`vtk-examples/` takes a different approach from the two examples above: instead of
+every plotting script reading the ZSoil result files directly, one shared exporter
+(`zsoil_to_vtk.py`) turns the mesh + results into a ParaView-readable VTK time series
+once, and everything downstream reads *that* — mostly without touching ZSoilPy3 at all.
+
+```mermaid
+graph LR
+  A["Input deck<br/>*.inp / *.dat"] --> B["ZSoil solver"]
+  B --> C[("Binary result set<br/>.his .rcf .rNN/.sNN")]
+  C --> D["zsoil_to_vtk.py<br/>(needs ZSoilPy3)"]
+  D --> E[(".vtu per step/group<br/>+ .pvd collection")]
+  E --> F["plot_*.py<br/>vtk + numpy + matplotlib only"]
+  F --> G["figures<br/>.png"]
+```
+
+Three shared files live directly in `vtk-examples/`, used by every example folder
+underneath it (currently just `3Ddeepex/`):
+
+| File | Purpose |
+|---|---|
+| `zsoilpy_env.py` | Locates ZSoilPy3 on disk (same helper as `BerlinSand/`/`PileFoundation/`) |
+| `zsoil_to_vtk.py` | Exports one project to `.vtu`/`.pvd` (`export_to_vtk()`); the only file here that needs ZSoilPy3 |
+| `vtk_cut_utils.py` | `CutPlane`, `project_on_plane`, `GetDiscreteColormap`, `get_tstr` — no ZSoilPy3 dependency, shared by every cross-section script |
+
+`export_to_vtk()` controls which steps, element groups and result arrays get written
+(`DEFAULT_ELEMENT_ARRAYS`) — including, for `SHELLS`, `BEAMS` and 3D `CONTACT`
+elements, each element's own local coordinate axes (`LocalX`/`LocalY`/`LocalZ`, from
+`get_element_local_axes()`). That's what lets `plot_wall_diagrams.py` resolve bending
+moment and shear about the model's own vertical direction correctly for a wall facing
+*any* way, using plain numpy on the exported arrays — without reopening the ZSoil
+project.
+
+## 3Ddeepex — 3D braced excavation
+
+A rectangular excavation retained by diaphragm walls (`SHELLS`, one material per wall
+face) and props, modeled in 3D. `extract_vtk.py` exports the steps/groups this example
+needs; the three `plot_*.py` scripts each cut the exported mesh with one or more
+vertical planes (`CutPlane`, from `vtk_cut_utils.py`) and plot the intersection.
+
+| Script | Selects | Extracts (API) | Produces |
+|---|---|---|---|
+| `extract_vtk.py` | — | `zsoil_to_vtk.export_to_vtk(...)` | `.vtu`/`.pvd` for the groups/steps this example needs, under `pv/` |
+| `plot_geology_profiles.py` | VOLUMICS elements crossed by each cut plane | `Material` cell array from the `.vtu`; material labels via ZSoilPy3 `Mesh` | Cross-section colored by material, legended by name — `<prob>_geol_<title>.png` |
+| `plot_result_profiles.py` | Same cut planes; `nodal` or `element` mode | A chosen nodal (e.g. `DISP_TRA`) or element (e.g. `STRESSES`) field/component, straight from the `.vtu` | Cross-section colored by that field: filled contours (`tricontourf`) for nodal, flat cell patches for element — `<prob>_<field>-<comp>_<mode>_<title>.png` |
+| `plot_wall_diagrams.py` | SHELLS wall elements crossed by a plane, near one along-wall location | Raw `SMOMENT`/`SQFORCE` + `LocalX`/`LocalY`/`LocalZ` + `DISP_TRA`, all from the `.vtu` — no ZSoilPy3 | Horizontal displacement, bending moment and shear force vs. altitude — `<prob>_wall_diagrams_<title>.png` |
+
+Example output, wall diagrams at T=6:
+
+<table>
+<tr>
+<td><img src="vtk-examples/3Ddeepex/3Ddeepex_wall_diagrams_North%20wall%2C%20center.png" alt="North wall displacement, bending moment and shear force diagrams" width="420"></td>
+<td><img src="vtk-examples/3Ddeepex/3Ddeepex_wall_diagrams_East%20wall%2C%20center.png" alt="East wall displacement, bending moment and shear force diagrams" width="420"></td>
+</tr>
+<tr>
+<td><sub>North wall (running east-west) — same script, same physical quantities as the East wall despite the 90° different orientation</sub></td>
+<td><sub>East wall (running north-south)</sub></td>
+</tr>
+</table>
+
 ## ZSoilPy3 API surface used
 
-Across both examples, the scripts touch: `C_Mesh`, `C_HistoryOfExecution`,
+`BerlinSand/` and `PileFoundation/` touch: `C_Mesh`, `C_HistoryOfExecution`,
 `C_Rcf_info`, `C_NodalResults`, `C_BeamResults`, `C_TrussResults`,
 `C_Contact_2D_Results`, `C_Contact_3D_Results`, and `C_ContinuumResults`.
+`vtk-examples/` needs the SDK only for `zsoil_to_vtk.py` itself (plus material labels
+in `plot_geology_profiles.py`); the rest of that pipeline runs on `vtk`/`numpy`/
+`matplotlib` alone once the `.vtu` files exist.
