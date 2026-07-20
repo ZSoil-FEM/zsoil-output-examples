@@ -122,41 +122,39 @@ NODAL_RESULT_BLOCKS = [
     ("NODAL_ACC", "nod_rcf_a"),
 ]
 
-# "Material", "EF" and "LF" aren't .rcf result items -- they're per-element
-# material/exf/unlf properties written by add_element_identity_arrays() from
-# the mesh itself, not read via rcf.give_ele_rcf_items_for_group(). They're
-# still filtered against each group's DEFAULT_ELEMENT_ARRAYS entry like any
-# other array, but add_element_result_arrays() (which only knows about real
-# .rcf items) needs to ignore them when checking for "requested but missing"
-# names, since it will never find them there.
-IDENTITY_ARRAY_NAMES = {"Material", "EF", "LF"}
+# "Material", "EF", "LF", "LocalX", "LocalY", "LocalZ" aren't .rcf result
+# items -- they're per-element properties written by
+# add_element_identity_arrays() from the mesh itself (material/exf/unlf
+# properties, and each element's own local coordinate system -- see
+# get_element_local_axes()), not read via rcf.give_ele_rcf_items_for_group().
+# They're still filtered against each group's DEFAULT_ELEMENT_ARRAYS entry
+# like any other array, but add_element_result_arrays() (which only knows
+# about real .rcf items) needs to ignore them when checking for "requested
+# but missing" names, since it will never find them there.
+IDENTITY_ARRAY_NAMES = {"Material", "EF", "LF", "LocalX", "LocalY", "LocalZ"}
 
 # Which named result arrays to export by default, instead of every array the
 # .rcf happens to contain. `None` (as a dict value) means "export everything"
-# for that group -- Material/EF/LF included, since add_element_identity_arrays()
-# treats None the same way.
+# for that group -- Material/EF/LF/LocalX/LocalY/LocalZ included, since
+# add_element_identity_arrays() treats None the same way.
 DEFAULT_NODAL_ARRAYS = ["DISP_TRA", "PPRESS", "PRES_HEAD"]
 DEFAULT_ELEMENT_ARRAYS = {
     "VOLUMICS":  ["Material", "EF", "LF", "STRESSES", "STRAINS", "STR_LEVEL", "PLA_CODE", "SAT_EFF"],
-    "SHELLS":    ["Material", "EF", "LF", "THICK", "SMFORCE", "SMOMENT", "SQFORCE"],
+    "SHELLS":    ["Material", "EF", "LF", "THICK", "SMFORCE", "SMOMENT", "SQFORCE",
+                  "LocalX", "LocalY", "LocalZ"],
     "TRUSSES":   ["FORCE"],
-    "BEAMS":     ["FORCE", "MOMENT"],
-    "CONTACT":   ["STRESSES", "STRAINS", "PLA_CODE", "STR_LEVEL"],
+    "BEAMS":     ["FORCE", "MOMENT", "LocalX", "LocalY", "LocalZ"],
+    "CONTACT":   ["STRESSES", "STRAINS", "PLA_CODE", "STR_LEVEL", "LocalX", "LocalY", "LocalZ"],
     "MEMBRANE":  None,
     "HEAT_EXCH": None,
 }
 
 
-def get_tstr(t):
-    """Format a time value the same way as zsoil_tools.vtktools.get_tstr():
-    T=1.2 -> '001_20' (integer part zero-padded to 3 digits, fractional part
-    as hundredths zero-padded to 2 digits)."""
-    intpart = int(float("%1.2f" % t))
-    frac = int(round(100 * (t - intpart)))
-    if frac >= 100:
-        intpart += 1
-        frac -= 100
-    return "{:03d}_{:02d}".format(intpart, frac)
+# get_tstr() now lives in vtk_cut_utils.py (no SDK dependency there), so
+# scripts that only need to build a .vtu filename don't have to import the
+# ZSoilPy3 SDK; re-exported here so `from zsoil_to_vtk import get_tstr`
+# (used elsewhere in this repo) keeps working unchanged.
+from vtk_cut_utils import get_tstr  # noqa: F401
 
 
 def get_vtk_cell_type(element, warned_labels):
@@ -286,17 +284,101 @@ def build_group_grid_for_step(points, node_id_of, elements_all, time, warned_lab
     return grid, cell_records, active_elements
 
 
+def _xy_plane_axes(local_x):
+    """local_y/local_z for a line element, assuming the model's analysis
+    plane is global X-Y -- ZSoil's own convention for 2D/axisymmetric
+    problems, where Z is the fixed out-of-plane direction. A line alone
+    doesn't determine an orientation in true 3D, so this is only meaningful
+    for elements that are actually part of a 2D model."""
+    local_y = np.cross((0.0, 0.0, 1.0), local_x)
+    norm = np.linalg.norm(local_y)
+    if norm < 1e-9:
+        return None
+    local_y = local_y / norm
+    local_z = np.cross(local_x, local_y)
+    return local_x, local_y, local_z
+
+
+def get_element_local_axes(element, mesh):
+    """
+    Return (local_x, local_y, local_z), three unit 3-vectors giving one
+    element's own local coordinate system -- the axes SMOMENT/SMFORCE/
+    SQFORCE (shells), STRESSES/STRAINS (contact) and FORCE/MOMENT (beams)
+    are expressed in -- or None if this element has no convention set up
+    here.
+
+    - SHELLS and 3D CONTACT (C_Q4/C_T3): taken directly from ZSoilPy3's own
+      reference geometry (Element.ref_ele.get_T_LG0()); local_z is the
+      element's own normal, local_x/local_y span its plane. This is the
+      element's natural, untransformed local base -- Element.
+      set_transf_matrices() rotates further toward a caller-chosen
+      reference direction (see e.g. 3Ddeepex/plot_wall_diagrams.py), which
+      is a per-use-case choice this export doesn't make for you.
+    - BEAMS: local_x is the beam axis (node 0 -> node 1). local_y/local_z
+      come from the beam's "director" reference node when the mesh defines
+      one (director index != 0); FORCE/MOMENT are expressed in this same
+      triad. Without a usable director (seen on 2D models, where it's
+      [0, 0]), falls back to the 2D X-Y convention below.
+    - 2D/line CONTACT elements (C_L2, CB_L2), which have no ref_ele: local_x
+      is the line's own tangent, local_y/local_z from the 2D X-Y fallback.
+    - Anything else (TRUSSES, MEMBRANE, HEAT_EXCH, point elements like
+      CNNPL, ...): returns None -- no local axis convention is set up here.
+    """
+    ref_ele = getattr(element, "ref_ele", None)
+    if ref_ele is not None:
+        T_LG0 = ref_ele.get_T_LG0(element.get_ele_coord())
+        return T_LG0[:, 0], T_LG0[:, 1], T_LG0[:, 2]
+
+    if element.group == "BEAMS":
+        node0 = np.array(mesh.nodes[element.nodes[0] - 1].xyz)
+        node1 = np.array(mesh.nodes[element.nodes[1] - 1].xyz)
+        tangent = node1 - node0
+        norm = np.linalg.norm(tangent)
+        if norm < 1e-9:
+            return None
+        local_x = tangent / norm
+
+        directors = getattr(element, "directors", None)
+        if directors and directors[0] != 0:
+            dnode = np.array(mesh.nodes[directors[0] - 1].xyz)
+            ref_vec = dnode - node0
+            local_z = np.cross(local_x, ref_vec)
+            zn = np.linalg.norm(local_z)
+            if zn > 1e-9:
+                local_z = local_z / zn
+                local_y = np.cross(local_z, local_x)
+                return local_x, local_y, local_z
+        return _xy_plane_axes(local_x)
+
+    if element.label in ("C_L2", "CB_L2"):
+        node0 = np.array(mesh.nodes[element.nodes[0] - 1].xyz)
+        node1 = np.array(mesh.nodes[element.nodes[1] - 1].xyz)
+        tangent = node1 - node0
+        norm = np.linalg.norm(tangent)
+        if norm < 1e-9:
+            return None
+        return _xy_plane_axes(tangent / norm)
+
+    return None
+
+
 def add_element_identity_arrays(grid, mesh, cell_records, wanted_names=None):
     """
     Always writes ElementIndex/ElementLabel/Side (needed to identify cells).
-    Material/EF/LF are written too unless `wanted_names` is given and
-    excludes them (see IDENTITY_ARRAY_NAMES).
+    Material/EF/LF/LocalX/LocalY/LocalZ are written too unless
+    `wanted_names` is given and excludes them (see IDENTITY_ARRAY_NAMES and
+    get_element_local_axes()).
     """
     n = len(cell_records)
     ele_index = np.empty(n, dtype=np.int32)
     material = np.empty(n, dtype=np.int32)
     ef = np.empty(n, dtype=np.int32)
     lf = np.empty(n, dtype=np.int32)
+
+    want_axes = wanted_names is None or {"LocalX", "LocalY", "LocalZ"} & set(wanted_names)
+    local_x = np.full((n, 3), np.nan, dtype=np.float32) if want_axes else None
+    local_y = np.full((n, 3), np.nan, dtype=np.float32) if want_axes else None
+    local_z = np.full((n, 3), np.nan, dtype=np.float32) if want_axes else None
 
     label_arr = vtk.vtkStringArray()
     label_arr.SetName("ElementLabel")
@@ -313,6 +395,10 @@ def add_element_identity_arrays(grid, mesh, cell_records, wanted_names=None):
         lf[i] = mat.unlf_index
         label_arr.SetValue(i, e.label)
         side_arr.SetValue(i, side or "")
+        if want_axes:
+            axes = get_element_local_axes(e, mesh)
+            if axes is not None:
+                local_x[i], local_y[i], local_z[i] = axes
 
     cdata = grid.GetCellData()
     ele_index_arr = numpy_support.numpy_to_vtk(ele_index, deep=True)
@@ -325,6 +411,15 @@ def add_element_identity_arrays(grid, mesh, cell_records, wanted_names=None):
         vtk_arr = numpy_support.numpy_to_vtk(arr, deep=True)
         vtk_arr.SetName(name)
         cdata.AddArray(vtk_arr)
+
+    if want_axes:
+        for name, arr in [("LocalX", local_x), ("LocalY", local_y), ("LocalZ", local_z)]:
+            if wanted_names is not None and name not in wanted_names:
+                continue
+            vtk_arr = numpy_support.numpy_to_vtk(arr, deep=True)
+            vtk_arr.SetName(name)
+            cdata.AddArray(vtk_arr)
+
     cdata.AddArray(label_arr)
     cdata.AddArray(side_arr)
 
@@ -589,9 +684,9 @@ def main():
     parser.add_argument("--element-arrays", default=[], action="append", metavar="GROUP=NAME1,NAME2,...",
                          help="Restrict one group's element result arrays; NAMEs may be 'all'. Repeatable. "
                               "Groups not given here keep DEFAULT_ELEMENT_ARRAYS' own default for that "
-                              "group (every group defaults to at least Material,EF,LF; "
-                              "VOLUMICS: {}; SHELLS adds THICK).".format(
-                                  ",".join(DEFAULT_ELEMENT_ARRAYS["VOLUMICS"])))
+                              "group -- see that dict for the per-group defaults (SHELLS/BEAMS/CONTACT "
+                              "include LocalX/LocalY/LocalZ, each element's own local coordinate system; "
+                              "see get_element_local_axes()).")
     args = parser.parse_args()
 
     steps = [float(s) for s in _parse_csv(args.steps)] if args.steps else None

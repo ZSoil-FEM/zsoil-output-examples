@@ -24,6 +24,21 @@ def project_on_plane(axes, origin, pt):
     return (np.dot(axes[0], rel), np.dot(axes[1], rel))
 
 
+def get_tstr(t):
+    """Format a time value the same way as zsoil_tools.vtktools.get_tstr()
+    (and zsoil_to_vtk.py, which re-exports this same function): T=1.2 ->
+    '001_20' (integer part zero-padded to 3 digits, fractional part as
+    hundredths zero-padded to 2 digits). Lives here rather than in
+    zsoil_to_vtk.py so scripts that only need to build a .vtu filename don't
+    have to import the ZSoilPy3 SDK to get it."""
+    intpart = int(float("%1.2f" % t))
+    frac = int(round(100 * (t - intpart)))
+    if frac >= 100:
+        intpart += 1
+        frac -= 100
+    return "{:03d}_{:02d}".format(intpart, frac)
+
+
 def GetDiscreteColormap(minmax, colormap='ZSoil_maps', ncol=20):
     """Build a discrete (ncol, evenly spaced) colormap/norm/ticks over
     [minmax[0], minmax[1]]. 'ZSoil_maps' interpolates ZSoil's own blue-to-red

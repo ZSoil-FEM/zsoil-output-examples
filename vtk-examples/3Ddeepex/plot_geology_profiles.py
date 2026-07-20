@@ -40,8 +40,7 @@ from C_Mesh import Mesh
 N_MAT_COLORS = 20
 
 
-def main(cut_planes, prob="3Ddeepex", step=6, zs_path="zsoil-files", vtk_dir="pv",
-         matlist=(1, 2, 3, 4, 5, 6)):
+def main(cut_planes, prob, step, zs_path, vtk_dir, matlist):
     """
     Plot one geology cross section per entry in `cut_planes` (a list of
     CutPlane; there's no default -- see the module docstring for CutPlane),
@@ -142,4 +141,9 @@ if __name__ == "__main__":
     ]
     # ----------------------- End of config section ----------------------
 
-    main(cut_planes)
+    main(cut_planes,
+         prob="3Ddeepex",
+         step=6,
+         zs_path="zsoil-files",
+         vtk_dir="pv",
+         matlist=(1, 2, 3, 4, 5, 6))

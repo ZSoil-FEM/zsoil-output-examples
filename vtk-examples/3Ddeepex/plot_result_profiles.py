@@ -88,8 +88,7 @@ def fan_triangles(n_pts):
     return [(0, i, i + 1) for i in range(1, n_pts - 1)]
 
 
-def main(cut_planes, prob="3Ddeepex", step=6, zs_path="zsoil-files", vtk_dir="pv",
-         mode="nodal", field="DISP_TRA", comp=0, group="VOLUMICS", matlist=()):
+def main(cut_planes, prob, step, zs_path, vtk_dir, mode, field, comp, group, matlist):
     """
     Plot one cross section per entry in `cut_planes` (see
     plot_geology_profiles.py for the CutPlane format), colored by a result
@@ -245,5 +244,24 @@ if __name__ == "__main__":
     ]
     # ----------------------- End of config section ----------------------
 
-    main(cut_planes, mode="nodal", field="DISP_TRA", comp="X")
-    main(cut_planes, mode="element", field="STRESSES", comp="XX")
+    main(cut_planes,
+         prob="3Ddeepex",
+         step=6,
+         zs_path="zsoil-files",
+         vtk_dir="pv",
+         mode="nodal",
+         field="DISP_TRA",
+         comp="X",
+         group="VOLUMICS",
+         matlist=())
+
+    main(cut_planes,
+         prob="3Ddeepex",
+         step=6,
+         zs_path="zsoil-files",
+         vtk_dir="pv",
+         mode="element",
+         field="STRESSES",
+         comp="XX",
+         group="VOLUMICS",
+         matlist=())
