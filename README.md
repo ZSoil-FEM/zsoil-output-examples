@@ -1,4 +1,4 @@
-# ZSoilPy-examples
+# zsoil-output-examples
 
 A collection of examples using ZSoilPy to process ZSoil results.
 
@@ -6,7 +6,7 @@ A collection of examples using ZSoilPy to process ZSoil results.
 
 Clone the repository to your local machine:
    ```bash
-   git clone https://github.com/ZSoil-FEM/ZSoilPy-examples.git
+   git clone https://github.com/ZSoil-FEM/zsoil-output-examples.git
    ```
 
 The scripts import the `ZSoilPy3` package from the ZSoil installation directory (see the

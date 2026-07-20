@@ -1,5 +1,12 @@
 *.pyc
 *~
 *.swp
+__pycache__/
 res-files/
 auxiliary/
+vtk_output/
+*.vtu
+*.pvd
+pv/
+**/zsoil-files/*
+!**/zsoil-files/*.inp
