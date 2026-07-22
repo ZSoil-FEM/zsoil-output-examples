@@ -23,6 +23,7 @@ read the solver's result files and turn them into figures:
 | [`BerlinSand/`](BerlinSand) | Braced excavation retained by an anchored diaphragm wall | `run_all.py` + 5 `plot_*.py` modules |
 | [`PileFoundation/`](PileFoundation) | 3×2 pile group under a raft | `plot_piles_3D.py`, `plot_piles_diagrams.py` |
 | [`vtk-examples/3Ddeepex/`](vtk-examples/3Ddeepex) | 3D braced excavation with diaphragm walls (shell elements) | `extract_vtk.py` + 3 `plot_*.py` modules, on top of the shared `vtk-examples/zsoil_to_vtk.py` exporter |
+| [`vtk-examples/IntegrateMNTfromContinuum/`](vtk-examples/IntegrateMNTfromContinuum) | 3D tunnel lining modeled as a solid continuum (no shell force resultants) | `extract_vtk.py` + `integrate_mnt_from_continuum.py` |
 
 ## Extraction pipeline
 
@@ -140,6 +141,45 @@ Example output, wall diagrams at T=6:
 <tr>
 <td><sub>North wall (running east-west) — same script, same physical quantities as the East wall despite the 90° different orientation</sub></td>
 <td><sub>East wall (running north-south)</sub></td>
+</tr>
+</table>
+
+## IntegrateMNTfromContinuum — tunnel lining as a solid continuum
+
+A tunnel lining modeled with `VOLUMICS` solid elements has no shell-style force
+resultants of its own (`SMOMENT`/`SQFORCE`), unlike the `SHELLS` walls in
+`3Ddeepex/`. This example derives the same physical quantities — bending moment
+(M), normal force (N) and transverse shear (T) — by integrating the lining's 3D
+`STRESSES` across its thickness at points around the ring.
+
+A thin reference `SHELLS` surface with no stiffness of its own (the "neutral
+axis", exported with `include_inactive=True` since it carries no results)
+runs along the lining's mid-thickness. At each of the `axial_sections` cut
+through the tunnel axis, cutting this surface gives points around the ring;
+cutting the `VOLUMICS` lining a second time, perpendicular to the ring at each
+point, isolates the thin strip of solid elements spanning the lining's
+thickness there. Their stresses are rotated into a local (radial,
+tangential/hoop, axial) frame and integrated across the strip into M, N and T.
+
+| Script | Selects | Extracts (API) | Produces |
+|---|---|---|---|
+| `extract_vtk.py` | — | `zsoil_to_vtk.export_to_vtk(...)`, once for `VOLUMICS` and once for the `SHELLS` neutral axis (`include_inactive=True`) | `.vtu`/`.pvd` under `pv/` |
+| `integrate_mnt_from_continuum.py` | Lining `VOLUMICS` and neutral-axis `SHELLS` cut by each `axial_sections` plane, then integrated ring point by ring point | `STRESSES` from the `.vtu`, rotated into a local radial/hoop/axial frame — no ZSoilPy3 | Ring cross section with a hoop-stress distribution diagram, plus bending-moment/normal-force/eccentricity diagrams offset from the neutral axis — `<prob>_stresses_T<step>_sect<k>.png` |
+
+Note: the M/N/eccentricity diagrams are discontinuous where the ring is
+stitched together from independent segments — this is expected, not a bug in
+the integration.
+
+Example output at T=2, two cross sections along the tunnel axis:
+
+<table>
+<tr>
+<td><img src="vtk-examples/IntegrateMNTfromContinuum/3Dtunnel_stresses_T2_sect0.png" alt="Ring diagram at section 1" width="420"></td>
+<td><img src="vtk-examples/IntegrateMNTfromContinuum/3Dtunnel_stresses_T2_sect1.png" alt="Ring diagram at section 2" width="420"></td>
+</tr>
+<tr>
+<td><sub><code>3Dtunnel_stresses_T2_sect0.png</code> — Section 1</sub></td>
+<td><sub><code>3Dtunnel_stresses_T2_sect1.png</code> — Section 2</sub></td>
 </tr>
 </table>
 
