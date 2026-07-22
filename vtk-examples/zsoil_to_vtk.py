@@ -10,6 +10,7 @@
 #                  [--steps 3,5,7,9 | --last-only] [--groups VOLUMICS,CONTACT]
 #                  [--nodal-arrays DISP_TRA,PPRESS | all]
 #                  [--element-arrays GROUP=NAME1,NAME2,... | GROUP=all] (repeatable)
+#                  [--include-inactive]
 #              Also usable programmatically via export_to_vtk(project, ...) - see
 #              its docstring for the same options as real Python arguments.
 #
@@ -261,25 +262,40 @@ def build_mesh_index(mesh):
     return points, node_id_of, group_elements
 
 
-def build_group_grid_for_step(points, node_id_of, elements_all, time, warned_labels):
-    """Build a fresh grid containing only the elements of one group that are
-    active at the given time. Interface elements (SPLIT_LABELS) become two
-    cells, one per side. Returns (grid, cell_records, active_elements):
-      - cell_records[i] = (element, side_label) for cell i ('A'/'B'/None)
-      - active_elements = unique active elements (for result lookups)."""
+def build_group_grid_for_step(points, node_id_of, elements_all, time, warned_labels,
+                               include_inactive=False):
+    """Build a fresh grid containing the elements of one group active at the
+    given time; if `include_inactive`, also the group's inactive elements
+    (ZSoil keeps every node's defined position regardless of activation, so
+    an inactive element's geometry is still meaningful -- e.g. not-yet-
+    excavated soil, or a wall panel before construction). Interface elements
+    (SPLIT_LABELS) become two cells, one per side. Returns (grid,
+    cell_records, active_elements):
+      - cell_records[i] = (element, side_label, is_active) for cell i
+        ('A'/'B'/None side; is_active is always True unless include_inactive)
+      - active_elements = unique active elements (for result lookups --
+        inactive ones have nothing meaningful to read, see
+        add_element_result_arrays)."""
     active_elements = [e for e in elements_all if is_element_active(e, time)]
+    if include_inactive:
+        elements_to_draw = elements_all
+        active_set = set(active_elements)
+    else:
+        elements_to_draw = active_elements
+        active_set = None  # every drawn element is active; skip the lookup
 
     grid = vtk.vtkUnstructuredGrid()
     grid.SetPoints(points)
 
     cell_records = []
-    for e in active_elements:
+    for e in elements_to_draw:
+        is_active = True if active_set is None else (e in active_set)
         for vtk_type, node_list, side in expand_element_to_cells(e, warned_labels):
             id_list = vtk.vtkIdList()
             for n in node_list:
                 id_list.InsertNextId(node_id_of[n])
             grid.InsertNextCell(vtk_type, id_list)
-            cell_records.append((e, side))
+            cell_records.append((e, side, is_active))
 
     return grid, cell_records, active_elements
 
@@ -364,16 +380,18 @@ def get_element_local_axes(element, mesh):
 
 def add_element_identity_arrays(grid, mesh, cell_records, wanted_names=None):
     """
-    Always writes ElementIndex/ElementLabel/Side (needed to identify cells).
-    Material/EF/LF/LocalX/LocalY/LocalZ are written too unless
-    `wanted_names` is given and excludes them (see IDENTITY_ARRAY_NAMES and
-    get_element_local_axes()).
+    Always writes ElementIndex/ElementLabel/Side/Active (needed to identify
+    cells and, when export_to_vtk(include_inactive=True) drew inactive
+    elements too, tell them apart -- Active is 1/0). Material/EF/LF/LocalX/
+    LocalY/LocalZ are written too unless `wanted_names` is given and
+    excludes them (see IDENTITY_ARRAY_NAMES and get_element_local_axes()).
     """
     n = len(cell_records)
     ele_index = np.empty(n, dtype=np.int32)
     material = np.empty(n, dtype=np.int32)
     ef = np.empty(n, dtype=np.int32)
     lf = np.empty(n, dtype=np.int32)
+    active = np.empty(n, dtype=np.int8)
 
     want_axes = wanted_names is None or {"LocalX", "LocalY", "LocalZ"} & set(wanted_names)
     local_x = np.full((n, 3), np.nan, dtype=np.float32) if want_axes else None
@@ -387,12 +405,13 @@ def add_element_identity_arrays(grid, mesh, cell_records, wanted_names=None):
     side_arr.SetName("Side")
     side_arr.SetNumberOfTuples(n)
 
-    for i, (e, side) in enumerate(cell_records):
+    for i, (e, side, is_active) in enumerate(cell_records):
         mat = mesh.materials[e.material_index - 1]
         ele_index[i] = e.index
         material[i] = mat.index_in_inp
         ef[i] = mat.exf_index
         lf[i] = mat.unlf_index
+        active[i] = 1 if is_active else 0
         label_arr.SetValue(i, e.label)
         side_arr.SetValue(i, side or "")
         if want_axes:
@@ -404,6 +423,9 @@ def add_element_identity_arrays(grid, mesh, cell_records, wanted_names=None):
     ele_index_arr = numpy_support.numpy_to_vtk(ele_index, deep=True)
     ele_index_arr.SetName("ElementIndex")
     cdata.AddArray(ele_index_arr)
+    active_arr = numpy_support.numpy_to_vtk(active, deep=True)
+    active_arr.SetName("Active")
+    cdata.AddArray(active_arr)
 
     for name, arr in [("Material", material), ("EF", ef), ("LF", lf)]:
         if wanted_names is not None and name not in wanted_names:
@@ -506,8 +528,12 @@ def add_element_result_arrays(grid, rcf, ele_results, group, cell_records, activ
 
     avg_by_ele_index = {idx: sums[idx] / counts[idx] for idx in sums}
 
-    avg_matrix = np.zeros((len(cell_records), gp_size), dtype=np.float64)
-    for i, (e, side) in enumerate(cell_records):
+    # NaN (not 0.0) for any cell with no row above -- inactive elements
+    # (see export_to_vtk(include_inactive=True)) have nothing meaningful to
+    # report at this step, and NaN makes that visible instead of looking
+    # like a real zero reading.
+    avg_matrix = np.full((len(cell_records), gp_size), np.nan, dtype=np.float64)
+    for i, (e, side, is_active) in enumerate(cell_records):
         if e.index in avg_by_ele_index:
             avg_matrix[i] = avg_by_ele_index[e.index]
 
@@ -553,12 +579,13 @@ def write_pvd(pvd_path, entries):
 
 
 def export_to_vtk(project, outdir=None, steps=None, last_only=False, groups=None,
-                   nodal_arrays=DEFAULT_NODAL_ARRAYS, element_arrays=DEFAULT_ELEMENT_ARRAYS):
+                   nodal_arrays=DEFAULT_NODAL_ARRAYS, element_arrays=DEFAULT_ELEMENT_ARRAYS,
+                   include_inactive=False):
     """
     Export one project to a VTK/ParaView time series, one .vtu per (step,
     element group) plus a .pvd collection.
 
-    steps:          list of step times to export (exact match against the
+    steps:           list of step times to export (exact match against the
                      project's own time values, e.g. [3, 5, 7, 9]), or None
                      for every converged step. Ignored if `last_only` is True.
     last_only:       export only the last converged step.
@@ -570,6 +597,16 @@ def export_to_vtk(project, outdir=None, steps=None, last_only=False, groups=None
     element_arrays:  {group: list_of_names} restricting element result
                      arrays per group; a group missing from this dict (or
                      mapped to None) exports every array available for it.
+    include_inactive: also write elements not active at each exported step
+                     (e.g. not-yet-excavated soil, or a wall panel before
+                     construction), tagged via the "Active" cell array
+                     (1/0) so they can be filtered/hidden in ParaView.
+                     Their element-result arrays (STRESSES, SMOMENT, ...)
+                     are left as NaN, since ZSoil has nothing meaningful to
+                     report for them at that step; Material/EF/LF/LocalX/
+                     LocalY/LocalZ are still written normally, since those
+                     don't depend on activity. Default: only active
+                     elements are written, as before.
     """
     if not os.path.exists(project + ".dat"):
         sys.exit("Could not find '{}.dat'".format(project))
@@ -630,7 +667,8 @@ def export_to_vtk(project, outdir=None, steps=None, last_only=False, groups=None
                 continue
 
             grid, cell_records, active_elements = build_group_grid_for_step(
-                points, node_id_of, elements_all, time, warned_labels)
+                points, node_id_of, elements_all, time, warned_labels,
+                include_inactive=include_inactive)
             if not cell_records:
                 continue
 
@@ -687,6 +725,11 @@ def main():
                               "group -- see that dict for the per-group defaults (SHELLS/BEAMS/CONTACT "
                               "include LocalX/LocalY/LocalZ, each element's own local coordinate system; "
                               "see get_element_local_axes()).")
+    parser.add_argument("--include-inactive", action="store_true",
+                         help="Also write elements not active at each exported step (e.g. "
+                              "not-yet-excavated soil), tagged via the 'Active' cell array (1/0). "
+                              "Their result arrays are left blank (NaN) -- ZSoil has nothing "
+                              "meaningful to report for them then. Default: only active elements.")
     args = parser.parse_args()
 
     steps = [float(s) for s in _parse_csv(args.steps)] if args.steps else None
@@ -708,7 +751,8 @@ def main():
         element_arrays[group] = None if names.strip().lower() == "all" else _parse_csv(names)
 
     export_to_vtk(args.project, outdir=args.outdir, steps=steps, last_only=args.last_only,
-                  groups=groups, nodal_arrays=nodal_arrays, element_arrays=element_arrays)
+                  groups=groups, nodal_arrays=nodal_arrays, element_arrays=element_arrays,
+                  include_inactive=args.include_inactive)
 
 
 if __name__ == "__main__":
